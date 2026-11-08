@@ -1,0 +1,111 @@
+"""Codex 這一側：找 thread、排訊息進它的佇列、讀它的回覆。
+
+**送訊息**用官方 CLI `codex queue --thread <id> --message <text>`。它把訊息寫進
+共用 app-server daemon 的佇列；thread 閒著就立刻開一輪，忙著就等這一輪結束。
+Codex 桌面版、`codex` TUI、`codex exec` 都掛在同一個 daemon 上，所以一條路通吃。
+
+**讀**直接開 daemon 的 sqlite（唯讀）：
+- `state_5.sqlite` 的 `threads`：名稱、cwd、來源、更新時間。
+- `thread_history_1.sqlite` 的 `thread_turns`（每輪狀態）與 `thread_items`
+  （每一項，`agentMessage` 的 `phase` 分 `commentary` 旁白與 `final_answer`）。
+- `queue_1.sqlite` 的 `queued_items`：還沒被取走的訊息。
+
+這些表不是公開 API，Codex 升版可能改 schema 或換檔名（檔名帶版本號），失效時
+先看 docs/protocol.md 的查證方法。
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+import subprocess
+from contextlib import closing
+
+from agent_bridge import model
+from agent_bridge.config import Config
+
+# subagent（含 guardian review）是 thread 底下的分身，不是能對話的對象。
+_SUBAGENT_SOURCE_PREFIX = '{"subagent"'
+_BUSY_TURN = "inProgress"
+_FINAL_PHASE = "final_answer"
+
+
+def _connect(path) -> sqlite3.Connection:
+    # mode=ro：絕不寫 daemon 的資料庫；WAL 模式下唯讀連線仍看得到最新內容。
+    return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+
+def _turn_status(cfg: Config, thread_ids: list[str]) -> dict[str, str]:
+    if not thread_ids or not cfg.codex_history_db.exists():
+        return {}
+    marks = ",".join("?" * len(thread_ids))
+    with closing(_connect(cfg.codex_history_db)) as db:
+        rows = db.execute(
+            f"""select thread_id, status from thread_turns t
+                where thread_id in ({marks}) and rollout_ordinal = (
+                  select max(rollout_ordinal) from thread_turns
+                  where thread_id = t.thread_id)""", thread_ids).fetchall()
+    return {tid: (model.BUSY if st == _BUSY_TURN else model.IDLE)
+            for tid, st in rows}
+
+
+def peers(cfg: Config, include_subagents: bool = False,
+          limit: int = 30) -> list[model.Peer]:
+    if not cfg.codex_state_db.exists():
+        return []
+    where = "archived = 0"
+    if not include_subagents:
+        where += f" and source not like '{_SUBAGENT_SOURCE_PREFIX}%'"
+    with closing(_connect(cfg.codex_state_db)) as db:
+        rows = db.execute(
+            f"""select id, coalesce(nullif(name,''), nullif(title,''), ''),
+                       cwd, updated_at_ms
+                from threads where {where}
+                order by updated_at_ms desc limit ?""", (limit,)).fetchall()
+    status = _turn_status(cfg, [r[0] for r in rows])
+    return [model.Peer(kind=model.CODEX, id=tid, name=name, cwd=cwd or "",
+                       status=status.get(tid, model.UNKNOWN),
+                       updated_ms=int(ms or 0))
+            for tid, name, cwd, ms in rows]
+
+
+def send(cfg: Config, thread_id: str, text: str) -> str:
+    """回傳 Codex 給這則訊息的 queue item id。"""
+    done = subprocess.run(
+        [cfg.codex_bin, "queue", "--thread", thread_id, "--message", text],
+        capture_output=True, text=True)
+    if done.returncode != 0:
+        raise RuntimeError(f"codex queue 失敗：{(done.stderr or done.stdout).strip()}")
+    # 輸出形如 "Queued message <item> for thread <thread>."
+    words = done.stdout.split()
+    return words[2] if len(words) > 2 else ""
+
+
+def pending(cfg: Config, item_id: str) -> bool:
+    """這則訊息是否還在佇列裡沒被取走。"""
+    if not cfg.codex_queue_db.exists():
+        return False
+    with closing(_connect(cfg.codex_queue_db)) as db:
+        return db.execute("select 1 from queued_items where id = ?",
+                          (item_id,)).fetchone() is not None
+
+
+def replies(cfg: Config, thread_id: str) -> list[model.Reply]:
+    if not cfg.codex_history_db.exists():
+        return []
+    with closing(_connect(cfg.codex_history_db)) as db:
+        rows = db.execute(
+            """select item_json, created_at_ms from thread_items
+               where thread_id = ? and item_type = 'agentMessage'
+               order by rollout_ordinal""", (thread_id,)).fetchall()
+    out = []
+    for raw, at_ms in rows:
+        item = json.loads(raw)
+        if item.get("text"):
+            out.append(model.Reply(text=item["text"], at_ms=int(at_ms or 0),
+                                   final=item.get("phase") == _FINAL_PHASE))
+    return out
+
+
+def status(cfg: Config, thread_id: str) -> str:
+    return _turn_status(cfg, [thread_id]).get(thread_id, model.UNKNOWN)
+

@@ -1,0 +1,6 @@
+__pycache__/
+.venv/
+.pytest_cache/
+*.egg-info/
+# skill 連結是安裝時才建的，不進版控（理由見 src/agent_bridge/skills.py）
+.agents/
