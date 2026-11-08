@@ -70,7 +70,7 @@ def cmd_read(cfg, args) -> int:
 
 
 def cmd_skills_link(cfg, args) -> int:
-    for line in skills.link(REPO) or ["連結都已就緒，沒有變更"]:
+    for line in skills.link(Path(args.repo).expanduser().resolve()) or ["連結都已就緒，沒有變更"]:
         print(line)
     return 0
 
@@ -106,6 +106,9 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("skills", help="把 skill 連到 Claude Code 與 Codex 的掃描路徑")
     s.add_argument("action", choices=["link"])
+    s.add_argument("--repo", default=str(REPO),
+                   help="哪個 repo 的 .claude/skills（預設 agent-bridge 自己）；"
+                        "其他 repo 也用同一套連結規則，不必各抄一份")
     s.set_defaults(func=cmd_skills_link)
     return p
 
