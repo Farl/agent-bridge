@@ -26,6 +26,8 @@ from agent_bridge.config import Config
 # subagent（含 guardian review）是 thread 底下的分身，不是能對話的對象。
 _SUBAGENT_SOURCE_PREFIX = '{"subagent"'
 _BUSY_TURN = "inProgress"
+_FAILED_TURN = "failed"
+_TURN_STATUS = {_BUSY_TURN: model.BUSY, _FAILED_TURN: model.FAILED}
 _FINAL_PHASE = "final_answer"
 
 
@@ -44,8 +46,7 @@ def _turn_status(cfg: Config, thread_ids: list[str]) -> dict[str, str]:
                 where thread_id in ({marks}) and rollout_ordinal = (
                   select max(rollout_ordinal) from thread_turns
                   where thread_id = t.thread_id)""", thread_ids).fetchall()
-    return {tid: (model.BUSY if st == _BUSY_TURN else model.IDLE)
-            for tid, st in rows}
+    return {tid: _TURN_STATUS.get(st, model.IDLE) for tid, st in rows}
 
 
 def queued_counts(cfg: Config, thread_ids: list[str]) -> dict[str, int]:

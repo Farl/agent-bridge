@@ -118,8 +118,11 @@ def _settled(cfg: Config, receipt: Receipt) -> bool:
     if peer.kind == model.CODEX and receipt.queue_item and \
             codex.pending(cfg, receipt.queue_item):
         return False
-    if backend(peer.kind).status(cfg, peer.id) == model.BUSY:
+    current = backend(peer.kind).status(cfg, peer.id)
+    if current == model.BUSY:
         return False
+    if current == model.FAILED:
+        raise RuntimeError(f"{peer.address} 這一輪失敗了，訊息沒有被處理，之後要重送")
     return any(r.final for r in replies_since(cfg, peer, receipt.sent_ms))
 
 

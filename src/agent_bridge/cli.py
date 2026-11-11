@@ -7,7 +7,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from agent_bridge import bridge, config, skills
+from agent_bridge import bridge, config, model, skills
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -55,6 +55,9 @@ def cmd_send(cfg, args) -> int:
     if ahead >= cfg.backlog_warn:
         print(f"注意：前面還有 {ahead} 則在排隊，這則要等它們處理完才會被讀到。"
               "要修正方向時，與其追加，不如合併成一則完整的指示。", file=sys.stderr)
+    if receipt.peer.status == model.FAILED:
+        print("注意：對方上一輪失敗了（例如額度用完），這則多半也會失敗而被丟掉，"
+              "恢復後要重送。", file=sys.stderr)
     if not args.wait:
         return 0
     print("等待回覆中…", file=sys.stderr)

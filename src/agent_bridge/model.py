@@ -12,11 +12,14 @@ CLAUDE = "claude"
 CODEX = "codex"
 KINDS = (CLAUDE, CODEX)
 
-# 狀態只分三種，兩邊各自的細節（Claude 的 waitingFor、Codex 的 turn status）
+# 狀態只分四種，兩邊各自的細節（Claude 的 waitingFor、Codex 的 turn status）
 # 由各自的模組翻譯過來。
 BUSY = "busy"
 IDLE = "idle"
 UNKNOWN = "unknown"
+# 最近一輪失敗（例如 Codex 額度用完）。送過去的訊息會被這一輪吃掉、不會重排，
+# 所以看到它要回頭補送，而不是以為對方閒著在處理。
+FAILED = "failed"
 
 
 @dataclass(frozen=True)

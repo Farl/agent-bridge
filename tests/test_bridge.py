@@ -106,6 +106,16 @@ def test_codex_busy_when_latest_turn_in_progress(world):
     assert codex.status(world.cfg, CODEX_ID) == model.BUSY
 
 
+def test_codex_failed_turn_is_reported_and_stops_waiting(world):
+    # 額度用完時 Codex 一收到訊息就開一輪並失敗，訊息被吃掉，不能顯示成 idle。
+    world.add_codex(CODEX_ID, "Codex PM", turn="failed")
+    assert bridge.resolve(world.cfg, CODEX_ID).status == model.FAILED
+    receipt = bridge.send(world.cfg, CODEX_ID, "hi", wrap=False)
+    world.drain_queue()
+    with pytest.raises(RuntimeError, match="失敗"):
+        bridge.wait(world.cfg, receipt, timeout=1)
+
+
 def test_codex_peer_reports_messages_still_queued_ahead(world):
     world.add_codex(CODEX_ID, "Codex PM", turn="inProgress")
     bridge.send(world.cfg, CODEX_ID, "first", wrap=False)
