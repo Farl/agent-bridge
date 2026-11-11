@@ -104,3 +104,13 @@ def test_wait_ignores_replies_older_than_the_message(world):
 def test_codex_busy_when_latest_turn_in_progress(world):
     world.add_codex(CODEX_ID, "Codex PM", turn="inProgress")
     assert codex.status(world.cfg, CODEX_ID) == model.BUSY
+
+
+def test_codex_peer_reports_messages_still_queued_ahead(world):
+    world.add_codex(CODEX_ID, "Codex PM", turn="inProgress")
+    bridge.send(world.cfg, CODEX_ID, "first", wrap=False)
+    # 第二則送出前查到的 peer 就看得到前面那一則還在排隊。
+    receipt = bridge.send(world.cfg, CODEX_ID, "second", wrap=False)
+    assert receipt.peer.queued == 1
+    world.drain_queue()
+    assert bridge.resolve(world.cfg, CODEX_ID).queued == 0

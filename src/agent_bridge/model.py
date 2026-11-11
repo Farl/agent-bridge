@@ -28,6 +28,8 @@ class Peer:
     status: str
     updated: str = ""   # 人看的時間字串，排序用 updated_ms
     updated_ms: int = 0
+    # 還沒被對方取走的訊息數。只有 Codex 查得到；Claude inbox 看不到，固定為 0。
+    queued: int = 0
 
     @property
     def address(self) -> str:

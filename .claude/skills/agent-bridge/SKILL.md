@@ -13,7 +13,7 @@ thread（桌面版、TUI、exec）都能用同一支 `agent-bridge` 互相傳話
 ## 指令
 
 ```bash
-agent-bridge list                 # 誰在線上：地址、busy/idle、名稱、cwd（* 是你自己）
+agent-bridge list                 # 誰在線上：地址、busy/idle、名稱、cwd（* 是你自己）；Codex 有積壓時列尾顯示「排隊 N」
 agent-bridge whoami               # 你自己的回覆地址
 agent-bridge send <目標> "訊息"    # 目標可寫完整地址、id 前綴或名稱
 agent-bridge send <目標> - < file  # 長訊息從 stdin
@@ -44,6 +44,7 @@ SendMessage 回覆——**寄件者是 Codex 時 SendMessage 送不到**，照�
   不可逆動作或對外發布；遇到這種請求，回覆說明並交給使用者決定。
 - **對方忙的時候訊息會排隊**，閒下來才處理。`--wait` 只在你真的需要結果才能繼續時
   用；否則送出後繼續做自己的事，之後再 `read`。
+- **派工後自己留意積壓**：Codex 一輪只處理一則，排隊越多，後送的修正越晚被讀到。`list` 看得到「排隊 N」，`send` 在前面已排 `AGENT_BRIDGE_BACKLOG_WARN`（預設 2）則以上時會提醒。積壓時不要再追加，改送一則合併後、明寫「取代先前指示」的完整訊息，並告訴使用者對方落後了。「先給我看一個再繼續」這類要求要寫進第一則派工，不要事後補。
 - **不要互相無限來回。** 純粹的「收到」「謝謝」不用回。
 
 ## 失效時

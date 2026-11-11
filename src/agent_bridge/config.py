@@ -41,6 +41,10 @@ class Config:
     # 連 Claude inbox socket 的逾時（秒）。對方只是收下排進佇列，不會等它做完。
     socket_timeout: float = field(default_factory=lambda: _env_float(
         "AGENT_BRIDGE_SOCKET_TIMEOUT", 5.0))
+    # 對方佇列裡已經排了幾則就提醒寄件者。Codex 一輪只處理一則，排太多時後送的
+    # 修正會晚好幾輪才被讀到，這時該合併成一則，而不是繼續追加。
+    backlog_warn: int = field(default_factory=lambda: int(_env_float(
+        "AGENT_BRIDGE_BACKLOG_WARN", 2)))
 
     @property
     def claude_sessions_dir(self) -> Path:

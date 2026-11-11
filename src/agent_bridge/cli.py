@@ -33,8 +33,9 @@ def cmd_list(cfg, args) -> int:
     me = bridge.whoami()
     for p in peers:
         mark = "*" if p.address == me else " "
+        backlog = f"  排隊 {p.queued}" if p.queued else ""
         print(f"{mark} {p.address}  {p.status:<7} {_when(p.updated_ms)}  "
-              f"{p.name or '(未命名)'}  [{p.cwd}]")
+              f"{p.name or '(未命名)'}  [{p.cwd}]{backlog}")
     return 0
 
 
@@ -49,6 +50,11 @@ def cmd_send(cfg, args) -> int:
     receipt = bridge.send(cfg, args.target, body, wrap=not args.raw)
     print(f"已送到 {receipt.peer.address}（{receipt.peer.name or '未命名'}，"
           f"目前 {receipt.peer.status}）")
+    # peer 是送出前查的，所以 queued 是排在這則前面的數量。
+    ahead = receipt.peer.queued
+    if ahead >= cfg.backlog_warn:
+        print(f"注意：前面還有 {ahead} 則在排隊，這則要等它們處理完才會被讀到。"
+              "要修正方向時，與其追加，不如合併成一則完整的指示。", file=sys.stderr)
     if not args.wait:
         return 0
     print("等待回覆中…", file=sys.stderr)

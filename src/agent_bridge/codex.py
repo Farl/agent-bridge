@@ -48,6 +48,19 @@ def _turn_status(cfg: Config, thread_ids: list[str]) -> dict[str, str]:
             for tid, st in rows}
 
 
+def queued_counts(cfg: Config, thread_ids: list[str]) -> dict[str, int]:
+    """每個 thread 還有幾則訊息在排隊。積壓代表對方忙不過來，後送的會晚到。"""
+    if not thread_ids or not cfg.codex_queue_db.exists():
+        return {}
+    marks = ",".join("?" * len(thread_ids))
+    with closing(_connect(cfg.codex_queue_db)) as db:
+        rows = db.execute(
+            f"""select thread_id, count(*) from queued_items
+                where thread_id in ({marks}) group by thread_id""",
+            thread_ids).fetchall()
+    return dict(rows)
+
+
 def peers(cfg: Config, include_subagents: bool = False,
           limit: int = 30) -> list[model.Peer]:
     if not cfg.codex_state_db.exists():
@@ -61,10 +74,12 @@ def peers(cfg: Config, include_subagents: bool = False,
                        cwd, updated_at_ms
                 from threads where {where}
                 order by updated_at_ms desc limit ?""", (limit,)).fetchall()
-    status = _turn_status(cfg, [r[0] for r in rows])
+    ids = [r[0] for r in rows]
+    status = _turn_status(cfg, ids)
+    queued = queued_counts(cfg, ids)
     return [model.Peer(kind=model.CODEX, id=tid, name=name, cwd=cwd or "",
                        status=status.get(tid, model.UNKNOWN),
-                       updated_ms=int(ms or 0))
+                       updated_ms=int(ms or 0), queued=queued.get(tid, 0))
             for tid, name, cwd, ms in rows]
 
 
