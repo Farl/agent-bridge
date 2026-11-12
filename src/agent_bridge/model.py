@@ -45,3 +45,16 @@ class Reply:
     text: str
     at_ms: int
     final: bool
+
+
+@dataclass(frozen=True)
+class Queued:
+    """還在對方佇列裡、沒被取走的一則訊息。
+
+    `sender` 從信封讀出（`[agent-bridge] 來自 <地址>`）；不是經 agent-bridge 送的、
+    或 `--raw` 送的就是空字串，誰送的不知道。
+    """
+    id: str
+    sender: str
+    created_ms: int
+    text: str

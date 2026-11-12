@@ -31,6 +31,11 @@ class Config:
     # 待送訊息在 queue_1.sqlite。檔名帶版本號，Codex 升版時可能改名——見 docs/protocol.md。
     codex_home: Path = field(default_factory=lambda: _env_path(
         "CODEX_HOME", Path.home() / ".codex"))
+    # daemon 控制 socket 的覆寫；沒給就用 codex_home 底下的預設位置。
+    # Unix socket 路徑有長度上限（約 104 bytes），測試要另指短路徑。
+    codex_control_sock_override: Path | None = field(default_factory=lambda: (
+        Path(os.environ["AGENT_BRIDGE_CODEX_CONTROL_SOCK"]).expanduser()
+        if os.environ.get("AGENT_BRIDGE_CODEX_CONTROL_SOCK") else None))
     codex_bin: str = field(default_factory=lambda: os.environ.get(
         "AGENT_BRIDGE_CODEX_BIN", "codex"))
     # 等回覆時多久看一次、最多等多久（秒）。
@@ -65,6 +70,12 @@ class Config:
     @property
     def codex_queue_db(self) -> Path:
         return self.codex_home / "queue_1.sqlite"
+
+    @property
+    def codex_control_sock(self) -> Path:
+        """daemon 的控制 socket（Unix socket 上的 WebSocket）；列出、撤回排隊訊息走它。"""
+        return self.codex_control_sock_override or (
+            self.codex_home / "app-server-control" / "app-server-control.sock")
 
 
 def load() -> Config:

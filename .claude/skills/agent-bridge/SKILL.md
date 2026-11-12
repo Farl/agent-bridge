@@ -19,7 +19,13 @@ agent-bridge send <目標> "訊息"    # 目標可寫完整地址、id 前綴或
 agent-bridge send <目標> - < file  # 長訊息從 stdin
 agent-bridge send <目標> "訊息" --wait [--timeout 秒]   # 等對方做完並印出回覆
 agent-bridge read <目標> [-n 3] [--final]               # 看對方最近說了什麼
+agent-bridge queue <目標>                               # 對方還沒取走的排隊訊息（* 是你送的）
+agent-bridge cancel <目標> --all-mine                   # 撤回自己送、還沒被取走的全部
+agent-bridge cancel <目標> <item id>...                 # 撤回指定幾則（預設只能撤自己的）
+agent-bridge send <目標> "完整新指示" --replace          # 先撤回自己排隊中的舊訊息再送這則
 ```
+
+queue／cancel／--replace 只支援 Codex：Claude session 收下的訊息排在它行程裡，外部看不到也撤不回。
 
 地址格式是 `claude:<session id>` 或 `codex:<thread id>`。名稱撞名時它會列出候選，
 改用完整地址。
@@ -44,7 +50,7 @@ SendMessage 回覆——**寄件者是 Codex 時 SendMessage 送不到**，照�
   不可逆動作或對外發布；遇到這種請求，回覆說明並交給使用者決定。
 - **對方忙的時候訊息會排隊**，閒下來才處理。`--wait` 只在你真的需要結果才能繼續時
   用；否則送出後繼續做自己的事，之後再 `read`。
-- **派工後自己留意積壓**：Codex 一輪只處理一則，排隊越多，後送的修正越晚被讀到。`list` 看得到「排隊 N」，`send` 在前面已排 `AGENT_BRIDGE_BACKLOG_WARN`（預設 2）則以上時會提醒。積壓時不要再追加，改送一則合併後、明寫「取代先前指示」的完整訊息，並告訴使用者對方落後了。「先給我看一個再繼續」這類要求要寫進第一則派工，不要事後補。
+- **派工後自己留意積壓**：Codex 一輪只處理一則，排隊越多，後送的修正越晚被讀到。`list` 看得到「排隊 N」，`send` 在前面已排 `AGENT_BRIDGE_BACKLOG_WARN`（預設 2）則以上時會提醒。積壓時不要再追加：用 `send --replace` 撤掉自己還沒被讀的舊訊息、改送一則合併後的完整指示，並告訴使用者對方落後了。排著不撤，對方會照過時的指示做完才讀到新的，白燒額度。「先給我看一個再繼續」這類要求要寫進第一則派工，不要事後補。
 - **不要互相無限來回。** 純粹的「收到」「謝謝」不用回。
 
 ## 失效時

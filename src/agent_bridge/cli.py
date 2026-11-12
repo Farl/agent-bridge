@@ -47,14 +47,18 @@ def cmd_whoami(cfg, args) -> int:
 
 def cmd_send(cfg, args) -> int:
     body = sys.stdin.read() if args.message == "-" else args.message
-    receipt = bridge.send(cfg, args.target, body, wrap=not args.raw)
+    receipt = bridge.send(cfg, args.target, body, wrap=not args.raw,
+                          replace_mine=args.replace)
+    if receipt.replaced:
+        print(f"已撤回你先前排隊的 {len(receipt.replaced)} 則：{' '.join(receipt.replaced)}")
     print(f"已送到 {receipt.peer.address}（{receipt.peer.name or '未命名'}，"
           f"目前 {receipt.peer.status}）")
     # peer 是送出前查的，所以 queued 是排在這則前面的數量。
     ahead = receipt.peer.queued
     if ahead >= cfg.backlog_warn:
         print(f"注意：前面還有 {ahead} 則在排隊，這則要等它們處理完才會被讀到。"
-              "要修正方向時，與其追加，不如合併成一則完整的指示。", file=sys.stderr)
+              "要修正方向時，與其追加，不如合併成一則完整的指示，用 --replace 送"
+              "（會先撤回你自己還沒被讀的舊訊息）。", file=sys.stderr)
     if receipt.peer.status == model.FAILED:
         print("注意：對方上一輪失敗了（例如額度用完），這則多半也會失敗而被丟掉，"
               "恢復後要重送。", file=sys.stderr)
@@ -76,6 +80,49 @@ def cmd_read(cfg, args) -> int:
         replies = [r for r in replies if r.final]
     _print_replies(replies[-args.n:])
     return 0
+
+
+PREVIEW_CHARS = 80
+
+
+def _preview(text: str) -> str:
+    # 信封頭兩行（寄件者、回覆方式）另外顯示，預覽只看正文。
+    body = text.split("\n\n", 1)[1] if bridge.sender_of(text) else text
+    flat = " ".join(body.split())
+    return flat if len(flat) <= PREVIEW_CHARS else flat[:PREVIEW_CHARS] + "…"
+
+
+def cmd_queue(cfg, args) -> int:
+    peer, items = bridge.queue(cfg, args.target)
+    if args.json:
+        print(json.dumps([q.__dict__ for q in items], ensure_ascii=False, indent=2))
+        return 0
+    if not items:
+        print(f"{peer.address}（{peer.name or '未命名'}）沒有排隊中的訊息")
+        return 0
+    me = bridge.whoami()
+    print(f"{peer.address}（{peer.name or '未命名'}）排隊 {len(items)} 則，依處理順序：")
+    for q in items:
+        mine = "*" if me and q.sender == me else " "
+        print(f"{mine} {q.id}  {_when(q.created_ms)}  {q.sender or '(寄件者不明)'}\n"
+              f"    {_preview(q.text)}")
+    return 0
+
+
+def cmd_cancel(cfg, args) -> int:
+    if not (args.items or args.all_mine or args.sender):
+        print("agent-bridge: 要指定撤哪些：item id、--all-mine 或 --from <地址>",
+              file=sys.stderr)
+        return 1
+    result = bridge.cancel(cfg, args.target, item_ids=args.items or None,
+                           sender=args.sender, any_sender=args.any)
+    for iid in result.cancelled:
+        print(f"已撤回 {iid}")
+    for iid, why in result.skipped.items():
+        print(f"沒撤 {iid}：{why}", file=sys.stderr)
+    if not result.cancelled and not result.skipped:
+        print("沒有符合的排隊訊息")
+    return 0 if not result.skipped else 3
 
 
 def cmd_skills_link(cfg, args) -> int:
@@ -105,7 +152,24 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--wait", action="store_true", help="等對方處理完並印出回覆")
     s.add_argument("--timeout", type=float, help="--wait 最多等幾秒")
     s.add_argument("--raw", action="store_true", help="不加信封")
+    s.add_argument("--replace", action="store_true",
+                   help="先撤回自己還在對方佇列裡的舊訊息，再送這則（只限 Codex）")
     s.set_defaults(func=cmd_send)
+
+    s = sub.add_parser("queue", help="列出對方還沒取走的排隊訊息（只限 Codex）")
+    s.add_argument("target")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_queue)
+
+    s = sub.add_parser("cancel", help="撤回還沒被取走的排隊訊息（只限 Codex；預設只能撤自己送的）")
+    s.add_argument("target")
+    s.add_argument("items", nargs="*", help="要撤的 item id（可寫前綴，見 queue）")
+    s.add_argument("--all-mine", action="store_true", help="撤回自己送的全部")
+    s.add_argument("--from", dest="sender", metavar="ADDR",
+                   help="以這個地址當寄件者（不在 agent 裡執行時用）；沒給 item 時撤它送的全部")
+    s.add_argument("--any", action="store_true",
+                   help="指定的 item 不是自己送的也撤（例如替人清掉卡住的佇列）")
+    s.set_defaults(func=cmd_cancel)
 
     s = sub.add_parser("read", help="讀對方最近說的話")
     s.add_argument("target")

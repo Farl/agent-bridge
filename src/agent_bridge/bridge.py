@@ -5,8 +5,9 @@ CLI 只負責參數與輸出，所有決定都在這裡，兩種 agent 走完全
 from __future__ import annotations
 
 import os
+import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 
 from agent_bridge import claude, codex, model
 from agent_bridge.config import Config
@@ -14,6 +15,8 @@ from agent_bridge.config import Config
 # 各家在自己的 shell 工具裡塞給子程序的「我是誰」。
 SELF_ENV = {model.CLAUDE: "CLAUDE_CODE_SESSION_ID", model.CODEX: "CODEX_THREAD_ID"}
 ENVELOPE_TAG = "[agent-bridge]"
+# envelope() 第一行的寄件者地址；撤回時靠它判斷是不是自己送的。
+_ENVELOPE_SENDER = re.compile(rf"^{re.escape(ENVELOPE_TAG)} 來自 (\S+:\S+)")
 
 _BACKENDS = {model.CLAUDE: claude, model.CODEX: codex}
 
@@ -82,6 +85,12 @@ def envelope(sender: model.Peer | str | None, body: str) -> str:
     return f"{head}\n\n{body}"
 
 
+def sender_of(text: str) -> str:
+    """從信封讀出寄件者地址；沒有信封（外部程式、--raw）就是空字串。"""
+    m = _ENVELOPE_SENDER.match(text)
+    return m.group(1) if m else ""
+
+
 def _sender(cfg: Config) -> model.Peer | str | None:
     me = whoami()
     if me is None:
@@ -97,16 +106,91 @@ class Receipt:
     peer: model.Peer
     sent_ms: int
     queue_item: str = ""   # 只有 Codex 有
+    replaced: list[str] = field(default_factory=list)  # --replace 撤回的舊訊息
 
 
-def send(cfg: Config, target: str, body: str, wrap: bool = True) -> Receipt:
+def send(cfg: Config, target: str, body: str, wrap: bool = True,
+         replace_mine: bool = False) -> Receipt:
+    """`replace_mine`：先撤回自己還在對方佇列裡的舊訊息，讓這則成為唯一有效的指示。"""
     peer = resolve(cfg, target)
+    replaced: list[str] = []
+    if replace_mine:
+        replaced = cancel(cfg, peer.address).cancelled
+        # 撤回後佇列變短了，警告要看新的排隊數。
+        peer = replace(peer, queued=max(0, peer.queued - len(replaced)))
     text = envelope(_sender(cfg), body) if wrap else body
     sent_ms = now_ms()
     if peer.kind == model.CODEX:
-        return Receipt(peer, sent_ms, codex.send(cfg, peer.id, text))
+        return Receipt(peer, sent_ms, codex.send(cfg, peer.id, text), replaced)
     claude.send(cfg, peer.id, text)
-    return Receipt(peer, sent_ms)
+    return Receipt(peer, sent_ms, replaced=replaced)
+
+
+# --- 排隊中的訊息 ----------------------------------------------------------
+
+def _require_codex(peer: model.Peer) -> None:
+    if peer.kind != model.CODEX:
+        # Claude inbox 收下就排進對方行程記憶體裡的佇列，協定只有 auth／user 兩種
+        # 訊息，外部看不到也撤不回（見 docs/protocol.md）。
+        raise RuntimeError(f"{peer.address} 是 Claude session：它的排隊訊息外部看不到，"
+                           "也撤不回。只有 Codex thread 支援 queue／cancel／--replace")
+
+
+def queue(cfg: Config, target: str) -> tuple[model.Peer, list[model.Queued]]:
+    peer = resolve(cfg, target)
+    _require_codex(peer)
+    items = [replace(q, sender=sender_of(q.text)) for q in codex.queue(cfg, peer.id)]
+    return peer, items
+
+
+@dataclass
+class CancelResult:
+    cancelled: list[str] = field(default_factory=list)
+    # 沒撤的：item id → 原因（不是自己送的、已被取走、找不到）。
+    skipped: dict[str, str] = field(default_factory=dict)
+
+
+def cancel(cfg: Config, target: str, item_ids: list[str] | None = None,
+           sender: str | None = None, any_sender: bool = False) -> CancelResult:
+    """撤回還沒被取走的訊息。
+
+    沒指定 item：撤 `sender`（預設自己）送的全部。指定 item：預設只撤自己送的，
+    `any_sender` 才放寬——別人的訊息可能是別的 agent 正在等的工作。
+    """
+    owner = sender or whoami()
+    if not owner and not (item_ids and any_sender):
+        raise RuntimeError("不知道你是誰（不在 Claude Code 或 Codex 裡執行）："
+                           "用 --from <你的地址> 指定寄件者，或指定 item id 加 --any")
+    peer, items = queue(cfg, target)
+    result = CancelResult()
+    if item_ids:
+        chosen = []
+        for wanted in item_ids:
+            hits = [q for q in items if q.id.startswith(wanted)]
+            if len(hits) != 1:
+                result.skipped[wanted] = ("不在佇列裡（可能已被取走）" if not hits
+                                          else "前綴對到不只一則，請寫完整 id")
+            elif not any_sender and hits[0].sender != owner:
+                result.skipped[hits[0].id] = (f"不是 {owner} 送的"
+                                              f"（寄件者：{hits[0].sender or '不明'}），要撤加 --any")
+            else:
+                chosen.append(hits[0].id)
+    else:
+        chosen = [q.id for q in items if q.sender == owner]
+    if not chosen:
+        return result
+    # daemon 在同一把鎖裡判斷能不能刪；deleted=False 就是剛好被取走了。
+    for iid, deleted in codex.cancel(cfg, peer.id, chosen).items():
+        if deleted:
+            result.cancelled.append(iid)
+        else:
+            result.skipped[iid] = "已被取走，來不及撤回"
+    # 改完再列一次確認，不只信 daemon 的回報。
+    left = {q.id for q in codex.queue(cfg, peer.id)}
+    still = [iid for iid in result.cancelled if iid in left]
+    if still:
+        raise RuntimeError(f"daemon 回報已撤回，但這幾則還在佇列裡：{', '.join(still)}")
+    return result
 
 
 def replies_since(cfg: Config, peer: model.Peer, since_ms: int) -> list[model.Reply]:

@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from agent_bridge import bridge, claude, codex, model
+from agent_bridge import bridge, claude, cli, codex, model
 from conftest import TOKEN
 
 CLAUDE_ID = "aaaa1111-0000-0000-0000-000000000000"
@@ -124,3 +124,109 @@ def test_codex_peer_reports_messages_still_queued_ahead(world):
     assert receipt.peer.queued == 1
     world.drain_queue()
     assert bridge.resolve(world.cfg, CODEX_ID).queued == 0
+
+
+# --- 排隊訊息：查看與撤回 ------------------------------------------------------
+
+ME = "claude:" + CLAUDE_ID
+OTHER = "claude:dddd4444-0000-0000-0000-000000000000"
+
+
+def _as(monkeypatch, address: str) -> None:
+    kind, _, sid = address.partition(":")
+    monkeypatch.setenv(bridge.SELF_ENV[kind], sid)
+
+
+def test_queue_lists_sender_and_order(world, monkeypatch):
+    world.add_codex(CODEX_ID, "Codex PM")
+    _as(monkeypatch, ME)
+    bridge.send(world.cfg, CODEX_ID, "第一則")
+    world.queue_raw(CODEX_ID, "人在桌面版打的")
+    peer, items = bridge.queue(world.cfg, CODEX_ID)
+    assert [q.sender for q in items] == [ME, ""]
+    assert items[0].text.endswith("第一則") and items[0].created_ms > 0
+
+
+def test_cancel_all_mine_leaves_others_queued(world, monkeypatch):
+    world.add_codex(CODEX_ID, "Codex PM")
+    _as(monkeypatch, OTHER)
+    theirs = bridge.send(world.cfg, CODEX_ID, "別人的").queue_item
+    _as(monkeypatch, ME)
+    mine = [bridge.send(world.cfg, CODEX_ID, f"我的 {i}").queue_item for i in range(2)]
+    result = bridge.cancel(world.cfg, CODEX_ID)
+    assert result.cancelled == mine and not result.skipped
+    assert world.queued() == [(theirs, CODEX_ID)]
+
+
+def test_cancel_by_id_refuses_others_unless_any(world, monkeypatch):
+    world.add_codex(CODEX_ID, "Codex PM")
+    raw = world.queue_raw(CODEX_ID, "不明寄件者")
+    _as(monkeypatch, ME)
+    result = bridge.cancel(world.cfg, CODEX_ID, item_ids=[raw])
+    assert result.cancelled == [] and "--any" in result.skipped[raw]
+    assert bridge.cancel(world.cfg, CODEX_ID, item_ids=[raw], any_sender=True).cancelled == [raw]
+    assert world.queued() == []
+
+
+def test_cancel_reports_items_already_taken(world, monkeypatch):
+    world.add_codex(CODEX_ID, "Codex PM")
+    _as(monkeypatch, ME)
+    iid = bridge.send(world.cfg, CODEX_ID, "x").queue_item
+    world.drain_queue()  # Codex 先一步取走了
+    result = bridge.cancel(world.cfg, CODEX_ID, item_ids=[iid])
+    assert result.cancelled == [] and "不在佇列" in result.skipped[iid]
+
+
+def test_cancel_outside_agent_needs_from(world):
+    world.add_codex(CODEX_ID, "Codex PM")
+    with pytest.raises(RuntimeError, match="--from"):
+        bridge.cancel(world.cfg, CODEX_ID)
+
+
+def test_cancel_with_from_works_outside_agent(world, monkeypatch):
+    world.add_codex(CODEX_ID, "Codex PM")
+    _as(monkeypatch, ME)
+    iid = bridge.send(world.cfg, CODEX_ID, "x").queue_item
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
+    assert bridge.cancel(world.cfg, CODEX_ID, sender=ME).cancelled == [iid]
+
+
+def test_send_replace_keeps_only_the_new_message(world, monkeypatch):
+    world.add_codex(CODEX_ID, "Codex PM")
+    _as(monkeypatch, OTHER)
+    theirs = bridge.send(world.cfg, CODEX_ID, "別人的").queue_item
+    _as(monkeypatch, ME)
+    old = bridge.send(world.cfg, CODEX_ID, "舊方向").queue_item
+    receipt = bridge.send(world.cfg, CODEX_ID, "新方向", replace_mine=True)
+    assert receipt.replaced == [old]
+    assert [i for i, _ in world.queued()] == [theirs, receipt.queue_item]
+
+
+def test_queue_and_cancel_refuse_claude_targets(world, monkeypatch):
+    world.add_claude(CLAUDE_ID, "Claude PM")
+    _as(monkeypatch, OTHER)
+    with pytest.raises(RuntimeError, match="撤不回"):
+        bridge.queue(world.cfg, CLAUDE_ID)
+    with pytest.raises(RuntimeError, match="撤不回"):
+        bridge.send(world.cfg, CLAUDE_ID, "x", replace_mine=True)
+
+
+def test_cancel_without_daemon_says_so(world, monkeypatch):
+    world.add_codex(CODEX_ID, "Codex PM")
+    _as(monkeypatch, ME)
+    world.cfg.codex_control_sock.unlink()
+    with pytest.raises(RuntimeError, match="沒在跑"):
+        bridge.cancel(world.cfg, CODEX_ID)
+
+
+def test_cli_queue_and_cancel(world, monkeypatch, capsys):
+    world.add_codex(CODEX_ID, "Codex PM")
+    _as(monkeypatch, ME)
+    monkeypatch.setattr("agent_bridge.config.load", lambda: world.cfg)
+    iid = bridge.send(world.cfg, CODEX_ID, "請看 " + "長" * 200).queue_item
+    assert cli.main(["queue", CODEX_ID]) == 0
+    out = capsys.readouterr().out
+    assert f"* {iid}" in out and ME in out and "回覆方式" not in out and "…" in out
+    assert cli.main(["cancel", CODEX_ID]) == 1  # 沒說撤哪些，不猜
+    assert cli.main(["cancel", CODEX_ID, "--all-mine"]) == 0
+    assert world.queued() == []

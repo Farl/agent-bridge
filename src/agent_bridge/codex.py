@@ -10,6 +10,10 @@ Codex 桌面版、`codex` TUI、`codex exec` 都掛在同一個 daemon 上，所
   （每一項，`agentMessage` 的 `phase` 分 `commentary` 旁白與 `final_answer`）。
 - `queue_1.sqlite` 的 `queued_items`：還沒被取走的訊息。
 
+**列出、撤回排隊訊息**走 daemon 的 JSON-RPC（`thread/queue/list`、
+`thread/queue/delete`，見 appserver.py），不直接改 sqlite：daemon 自己判斷訊息
+是否已被取走，也會通知掛著的 UI。
+
 這些表不是公開 API，Codex 升版可能改 schema 或換檔名（檔名帶版本號），失效時
 先看 docs/protocol.md 的查證方法。
 """
@@ -21,6 +25,7 @@ import subprocess
 from contextlib import closing
 
 from agent_bridge import model
+from agent_bridge.appserver import AppServer
 from agent_bridge.config import Config
 
 # subagent（含 guardian review）是 thread 底下的分身，不是能對話的對象。
@@ -125,3 +130,47 @@ def replies(cfg: Config, thread_id: str) -> list[model.Reply]:
 def status(cfg: Config, thread_id: str) -> str:
     return _turn_status(cfg, [thread_id]).get(thread_id, model.UNKNOWN)
 
+
+
+def _created_ms(cfg: Config, item_ids: list[str]) -> dict[str, int]:
+    # JSON-RPC 的回應沒有時間，從 sqlite 唯讀補上。
+    if not item_ids or not cfg.codex_queue_db.exists():
+        return {}
+    marks = ",".join("?" * len(item_ids))
+    with closing(_connect(cfg.codex_queue_db)) as db:
+        return dict(db.execute(
+            f"select id, created_at_ms from queued_items where id in ({marks})",
+            item_ids).fetchall())
+
+
+def _text(submission: dict) -> str:
+    return "\n".join(part.get("text", "") for part in submission.get("input", [])
+                     if part.get("type") == "text")
+
+
+def queue(cfg: Config, thread_id: str) -> list[model.Queued]:
+    """還沒被取走的訊息，依處理順序。寄件者留空，由 bridge 從信封讀。"""
+    with AppServer(cfg.codex_control_sock, cfg.socket_timeout) as srv:
+        items, cursor = [], None
+        while True:
+            page = srv.call("thread/queue/list",
+                            {"threadId": thread_id, "cursor": cursor})
+            items += page.get("data", [])
+            cursor = page.get("nextCursor")
+            if not cursor:
+                break
+    created = _created_ms(cfg, [i["id"] for i in items])
+    out = []
+    for item in items:
+        out.append(model.Queued(id=item["id"], sender="", text=_text(item),
+                                created_ms=int(created.get(item["id"]) or 0)))
+    return out
+
+
+def cancel(cfg: Config, thread_id: str, item_ids: list[str]) -> dict[str, bool]:
+    """撤回訊息。回傳每則是否真的撤掉；False 表示它已經被取走（或本來就不在）。"""
+    with AppServer(cfg.codex_control_sock, cfg.socket_timeout) as srv:
+        return {iid: bool(srv.call("thread/queue/delete",
+                                   {"threadId": thread_id, "queuedSubmissionId": iid}
+                                   ).get("deleted"))
+                for iid in item_ids}

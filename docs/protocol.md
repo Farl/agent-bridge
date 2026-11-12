@@ -4,6 +4,7 @@ agent-bridge 依賴的都是 Claude Code 與 Codex 的**內部**機制，不是�
 這份文件記錄每一條通道是什麼、怎麼找到的、升版壞掉時怎麼重新查證。
 
 查證時的版本：Claude Code 2.1.319、Codex CLI 0.162.1（daemon 0.167.0），2026-11-08，macOS。
+排隊查看與撤回：Codex CLI 0.167.1（daemon 0.167.2），2026-11-12。
 
 ## 外部 → Claude Code：跨 session inbox
 
@@ -28,7 +29,9 @@ pid 檔在 crash 時可能殘留，要用 `kill -0 <pid>` 驗活。`claude agent
 {"type":"user","message":{"role":"user","content":"<文字>"}}
 ```
 
-對方不回任何位元組。閒著就立刻開一輪，忙著就排隊。收到的訊息在對方那裡顯示成
+對方不回任何位元組。閒著就立刻開一輪，忙著就排隊。排隊在對方行程的記憶體裡，
+協定只有 `auth`、`user` 兩種訊息，外部**看不到也撤不回**（`strings` 查過，沒有
+cancel／list 類的型別），所以 queue／cancel 只支援 Codex。收到的訊息在對方那裡顯示成
 「Another Claude session sent a message」。
 
 **怎麼找到的**：把 `claude` 執行檔跑 `strings`，搜尋 `messagingSocketPath` 與
@@ -61,11 +64,35 @@ strings -n 8 "$(readlink -f "$(which claude)")" | grep -F '[uds-messaging]' | he
 | `state_5.sqlite` | `threads` | `id`、`name`／`title`、`cwd`、`source`、`archived`、`updated_at_ms` |
 | `thread_history_1.sqlite` | `thread_turns` | 每輪 `status`：`inProgress`、`completed`、`interrupted`、`failed` |
 | 同上 | `thread_items` | `item_type=agentMessage` 的 `item_json.text`，`phase` 是 `commentary` 或 `final_answer` |
-| `queue_1.sqlite` | `queued_items` | 還沒被取走的訊息（`id` 就是 queue 回的 item id） |
+| `queue_1.sqlite` | `queued_items` | 還沒被取走的訊息（`id` 就是 queue 回的 item id；`payload_json`、`created_at_ms`） |
 
 `source` 以 `{"subagent"` 開頭的是 subagent 或 guardian review，不是對話對象。
 
 檔名帶版本號，升版時可能變成 `state_6.sqlite` 之類，要改 `config.py`。
+
+**列出與撤回排隊訊息**：daemon 的 JSON-RPC，experimental 方法
+`thread/queue/list`（`{threadId, cursor}` → `data[]`：`id`、`input[]`）與
+`thread/queue/delete`（`{threadId, queuedSubmissionId}` → `{deleted}`）。
+另有 `add`、`update`、`reorder`、`start`，目前沒用到。
+
+- 連線：控制 socket `$CODEX_HOME/app-server-control/app-server-control.sock`，
+  協定是 **Unix socket 上的 WebSocket**（文字 frame，一則一個 JSON-RPC）。
+  `codex app-server proxy` 只轉送位元組，不會替你做 WebSocket，直接連 socket 比較簡單。
+- 先送 `initialize`，`capabilities.experimentalApi=true`，否則 queue 方法不開放；
+  再送 `initialized` 通知。
+- 不直接 `DELETE FROM queued_items`：daemon 在自己的鎖裡判斷訊息是否已被取走
+  （`deleted=false` 就是被取走了），也會發 `thread/queue/changed` 通知掛著的 UI；
+  直接改 sqlite 兩件事都做不到。`queued_items` 的刪除 trigger 會更新
+  `queued_thread_revisions`，daemon 是靠 revision 察覺變化的。
+- 回應沒有時間，`created_at_ms` 從 sqlite 唯讀補。
+- 寄件者從信封第一行 `[agent-bridge] 來自 <地址>` 讀；沒有信封的不知道是誰送的。
+
+**重新查證**（方法名或參數變了時）：
+
+```bash
+codex app-server generate-json-schema --experimental --out /tmp/codex-schema
+grep -o '"thread/queue/[a-z]*"' /tmp/codex-schema/ClientRequest.json | sort -u
+```
 
 **自己是誰**：Codex 給 shell 的環境變數 `CODEX_THREAD_ID`。
 

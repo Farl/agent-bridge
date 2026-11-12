@@ -21,7 +21,13 @@ agent-bridge skills link      # skill 連到 ~/.claude/skills 與 ~/.agents/skil
 agent-bridge list
 agent-bridge send codex:01a159cf "請幫我 review ~/Prototyper/foo 的 MR !12" --wait
 agent-bridge read claude:a4ff6083 --final
+agent-bridge queue codex:01a159cf                 # 對方還沒取走的排隊訊息
+agent-bridge cancel codex:01a159cf --all-mine     # 撤回自己送、還沒被取走的
+agent-bridge send codex:01a159cf "新指示" --replace   # 撤掉自己的舊訊息再送
 ```
+
+排隊查看與撤回只支援 Codex（Claude session 的排隊訊息外部看不到）。預設只能撤自己送的；
+不在 agent 裡執行（人在終端機）時用 `--from <地址>` 指定寄件者，或指定 item id 加 `--any`。
 
 agent 該怎麼用寫在 [`.claude/skills/agent-bridge/SKILL.md`](.claude/skills/agent-bridge/SKILL.md)，
 通道的細節與升版後怎麼重新查證寫在 [`docs/protocol.md`](docs/protocol.md)。
@@ -32,5 +38,5 @@ agent 該怎麼用寫在 [`.claude/skills/agent-bridge/SKILL.md`](.claude/skills
 uv run pytest
 ```
 
-測試用 tmp 目錄搭出假的 Claude 與 Codex 環境（真的 Unix socket、真的 sqlite），
+測試用 tmp 目錄搭出假的 Claude 與 Codex 環境（真的 Unix socket、真的 sqlite、假的 Codex daemon），
 不會碰到機器上正在跑的 session。所有路徑都能用環境變數覆寫，見 `src/agent_bridge/config.py`。
